@@ -68,29 +68,6 @@ chmod +x setup_sim_once.sh
 ```
 After running, you can launch "Sim" from your applications menu or the new icon on your Desktop. If the icon appears as "Untrusted," right-click it and select "Allow Launching."
 
-## 🛠️ How to Use
-
-### Simulation Tab
-
-1.  **PX4 Firmware Folder:** Browse and select the root directory of your `PX4-Autopilot` firmware (the one containing the `Makefile`). The application will **dynamically** find all available simulation targets (e.g., `gazebo_typhoon_h480`).
-2.  **Home Coordinates:** Enter your desired launch Latitude, Longitude, and Altitude (in meters AMSL). You can also use the **Import** button to load coordinates from a QGroundControl `.plan` or a `.kml` file.
-3.  **Speed & Vehicle:** Select your desired simulation speed factor and vehicle target.
-4.  Click **Start Simulation**. The logs will appear in the window below.
-
-### ULG → KML Tab
-
-## 🛡️ Online Authorization
-
-This application uses a remote-gate system to protect its core logic.
-
-* An **active internet connection** is **required** on application startup.
-* The app fetches the critical `bash` launch command from a secure, remote file.
-* If the connection fails or the remote file is inaccessible, the **Start Simulation** button will be permanently disabled, and the core simulation feature will not run.
-
-This ensures the application is always running the latest authorized version and protects the underlying intellectual property.
-
----
-
 ## Workflow: From Plan to Analysis
 
 Here is a typical workflow for planning a mission, simulating it, and reviewing the flight log.
@@ -124,10 +101,4 @@ Here is a typical workflow for planning a mission, simulating it, and reviewing 
 2.  Go to the **ULG → KML** tab.
 3.  Click **Browse** and select the `.ulg` flight log you want to analyze. (These are usually in your `.../PX4-Autopilot/build/px4_sitl_default/logs` directory).
 4.  Click **Convert ULG → KML** to generate a visual flight path for review in Google Earth.
-
-*Developed by Atiq*
-
-1.  **ULG Log File:** Click **Browse** and select the `.ulg` flight log you want to convert.
-2.  **Output Folder:** Click **Choose** to select where the new `.kml` file will be saved.
-3.  Click **Convert ULG → KML**. A confirmation will appear, and the file will be ready in your output folder.
 
