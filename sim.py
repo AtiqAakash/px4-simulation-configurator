@@ -3,17 +3,16 @@
 Beagle Sim — Simulation Suite (Ubuntu GUI)
 
 Fixes in this build:
-- Button sounds are now reliable (more fallbacks + bound to click & keyboard), and set to LOUD.
-- Explicitly uses distinct, available Ubuntu system sound files for better feedback.
-- Zenity file filters corrected so *.plan, *.kml, and *.ulg files show up properly.
-- NEW: Persists the last-used directory for all file/folder selection dialogs.
-- Home Altitude (m AMSL) input with configurable default (stored in config).
-- Loud audio feedback wired to all clickable/functional UI events.
-- Dynamic vehicle target list populated from PX4 directory structure.
-- Color-coded log output for better readability (launch, info, error).
+- CRITICAL FIX: Completely kills PX4/Gazebo processes on Stop/Exit (prevents QGC ghost connections).
+- Button sounds are reliable, LOUD, and use distinct Ubuntu system sounds.
+- Zenity file filters corrected.
+- Persists last-used directories.
+- Home Altitude (m AMSL) input.
+- Dynamic vehicle target list.
+- Color-coded log output.
 """
 
-import json, os, queue, subprocess, threading, webbrowser, xml.etree.ElementTree as ET, sys, shutil, math, io, urllib.request
+import json, os, queue, subprocess, threading, webbrowser, xml.etree.ElementTree as ET, sys, shutil, math, io, urllib.request, signal
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -59,28 +58,12 @@ def _ensure_import(modname, spec=None, log_fn=None):
             if log_fn: log_fn(f"[INSTALL] Still cannot import '{modname}': {e}\n")
             return False
 
-# ---------------- Sounds (FINAL: Distinct Ubuntu Sounds & Loud) ----------------
-# Uses distinct Freedesktop sound files that should be present on most Ubuntu/Linux systems.
+# ---------------- Sounds (Distinct Ubuntu Sounds & Loud) ----------------
 def play_sound(kind: str, widget: tk.Misc | None = None, *, loud: bool = True):
-    """
-    kind: "click","start","success","stop","error","info"
-    Tries (in order): canberra-gtk-play -> paplay/aplay (distinct freedesktop files) -> Tk bell -> terminal bell.
-    Always uses LOUD volume boost via paplay for clarity.
-    """
-    # Freedesktop Sound IDs (for canberra-gtk-play)
-    ids = {
-        "click": "button-pressed",
-        "start": "bell",                  # Distinct, traditional start sound
-        "success": "message-new-instant", # Good chime for success/completion
-        "stop": "message-new-email",      # Short, distinct notification for stopping
-        "error": "dialog-error",          
-        "info": "dialog-information", 
-    }
+    ids = { "click": "button-pressed", "start": "bell", "success": "message-new-instant", "stop": "message-new-email", "error": "dialog-error", "info": "dialog-information" }
     sid = ids.get(kind, "dialog-information")
-
-    # Explicit Freedesktop Sound Paths (for paplay/aplay)
     file_map = {
-        "click": "/usr/share/sounds/freedesktop/stereo/audio-volume-change.oga", # Short, crisp tap
+        "click": "/usr/share/sounds/freedesktop/stereo/audio-volume-change.oga",
         "start": "/usr/share/sounds/freedesktop/stereo/bell.oga",
         "success": "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga",
         "stop": "/usr/share/sounds/freedesktop/stereo/message-new-email.oga",
@@ -88,58 +71,34 @@ def play_sound(kind: str, widget: tk.Misc | None = None, *, loud: bool = True):
         "info": "/usr/share/sounds/freedesktop/stereo/dialog-information.oga",
     }
     file_path = file_map.get(kind)
-    
-    # 1) Try canberra-gtk-play (best integration)
     canberra = shutil.which("canberra-gtk-play")
     if canberra:
         try:
             subprocess.Popen([canberra, "--id", sid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if loud:
-                subprocess.Popen([canberra, "--id", sid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if loud: subprocess.Popen([canberra, "--id", sid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
-        except Exception:
-            pass
-
-    # 2) Try paplay (PulseAudio - preferred for high volume control)
+        except Exception: pass
     if file_path and Path(file_path).exists():
         paplay = shutil.which("paplay")
         if paplay:
             try:
-                # Use 98304 (~150%) volume for LOUD playback as requested
-                vol = "98304"
-                subprocess.Popen([paplay, "--volume", vol, file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen([paplay, "--volume", "98304", file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
-            except Exception:
-                pass
-        
-        # 3) Try aplay (ALSA - fallback)
+            except Exception: pass
         aplay = shutil.which("aplay")
         if aplay:
             try:
                 subprocess.Popen([aplay, file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
-            except Exception:
-                pass
-
-    # 4) Fallback to Tk bell
+            except Exception: pass
     try:
         if widget is not None:
             widget.bell()
-            if loud:
-                widget.after(40, lambda: widget.bell())
+            if loud: widget.after(40, lambda: widget.bell())
             return
-    except Exception:
-        pass
+    except Exception: pass
 
-    # 5) Fallback to Terminal bell
-    try:
-        print("\a", end="", flush=True)
-        if loud:
-            print("\a", end="", flush=True)
-    except Exception:
-        pass
-
-# ---------------- Robust ULG → KML fallback (bright red track) ----------------
+# ---------------- Robust ULG → KML fallback ----------------
 def _fallback_ulog_to_kml(ulg_path:str,out_path:str,downsample:int=5):
     from pyulog import ULog; import simplekml
     try: ulog=ULog(ulg_path, default_quaternion=True)
@@ -177,8 +136,7 @@ class ThemedApp(tk.Tk):
         super().__init__(className="beagle-sim")
         try: self.wm_class("beagle-sim")
         except Exception: pass
-        try:
-            self.call('tk','appname',APP_TITLE); self.call('wm','iconname','.',APP_TITLE)
+        try: self.call('tk','appname',APP_TITLE); self.call('wm','iconname','.',APP_TITLE)
         except Exception: pass
         self.title(APP_TITLE); self.geometry("1120x820"); self.minsize(940,720); self.configure(bg=BG)
         self._style(); self._load_icon()
@@ -235,29 +193,22 @@ class PX4SimApp(ThemedApp):
     def __init__(self):
         super().__init__()
         self.proc=None; self.log_queue=queue.Queue(); self._stop_reader=threading.Event(); self._log_visible=True
-        
-        # New variables to store last used directories
         self.ulg_last_dir = Path.home()
         self.kml_out_last_dir = Path.home() / "Documents"
-        
         self._build_ui(); self._load_config(); self._poll_log_queue()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # -------- Button helper (adds sound on click & keyboard) --------
     def _mk_button(self, parent, *, text, style, sound="click", command=None, **pack_kwargs):
         def invoke():
             play_sound(sound, widget=self, loud=True)
             if command: command()
         btn = ttk.Button(parent, text=text, style=style, command=invoke)
-        # mouse click
         btn.bind("<Button-1>", lambda e: play_sound(sound, widget=self, loud=True), add="+")
-        # keyboard: Space/Return
         btn.bind("<Key-Return>", lambda e: (play_sound(sound, widget=self, loud=True), invoke()), add="+")
         btn.bind("<Key-space>",  lambda e: (play_sound(sound, widget=self, loud=True), invoke()), add="+")
         btn.pack(**pack_kwargs)
         return btn
 
-    # -------- Pillow helpers --------
     def _load_pillow(self):
         def _log(s): 
             try: self._append_log(s)
@@ -292,31 +243,20 @@ class PX4SimApp(ThemedApp):
             return ImageTk.PhotoImage(img)
         except Exception: return None
 
-    # -------- Zenity presence --------
     def _zenity_available(self) -> bool:
         return shutil.which("zenity") is not None
 
-    # -------- Dynamic Vehicle Targets --------
     def _get_vehicle_targets(self, px4_dir: str):
-        """Finds potential vehicle targets in the PX4 firmware path."""
         path = Path(px4_dir) / "boards" / "px4" / "sitl"
-        
         default_target = "gazebo_typhoon_h480" 
-        
-        if not path.is_dir():
-            return [default_target] 
-        
+        if not path.is_dir(): return [default_target] 
         targets = []
         for d in path.iterdir():
             if d.is_dir() and (d / "default.cmake").exists():
                 targets.append(f"gazebo_{d.name}")
-        
         return sorted(targets) if targets else [default_target]
 
-
-    # -------- UI --------
     def _build_ui(self):
-        # Header
         header=ttk.Frame(self,padding=(24,20),style="CardAlt.TFrame"); header.pack(fill=tk.X)
         left=ttk.Frame(header,style="CardAlt.TFrame"); left.pack(side=tk.LEFT,anchor="w")
         self._header_logo=self._load_beagle_logo()
@@ -331,7 +271,6 @@ class PX4SimApp(ThemedApp):
         for ch in right.winfo_children():
             ch.bind("<Button-1>", lambda e:(play_sound("info", widget=self, loud=True), webbrowser.open_new_tab("https://atiq.no")))
 
-        # Glass backplate & segmented tabs
         plate=ttk.Frame(self,padding=18,style="Backplate.TFrame"); plate.pack(fill=tk.BOTH,expand=True,padx=16,pady=16)
         segrow=ttk.Frame(plate,padding=8,style="InnerPlate.TFrame"); segrow.pack(fill=tk.X,pady=(0,10))
         self._sim_page=ttk.Frame(plate,padding=16,style="InnerPlate.TFrame")
@@ -347,59 +286,39 @@ class PX4SimApp(ThemedApp):
         # --- Simulation UI ---
         root=ttk.Frame(self._sim_page,padding=0,style="InnerPlate.TFrame"); root.pack(fill=tk.BOTH,expand=True)
         ttk.Label(root,text="Launch PX4 SITL with your chosen home location.",style="Muted.TLabel").pack(anchor=tk.W,pady=(0,12))
-
         card=ttk.Frame(root,padding=16,style="Card.TFrame"); card.pack(fill=tk.X,pady=(0,12))
         r1=ttk.Frame(card,style="Card.TFrame"); r1.pack(fill=tk.X,pady=(0,12))
         ttk.Label(r1,text="PX4 Firmware Folder",style="Card.TLabel").pack(side=tk.LEFT)
         self.px4_dir_var=tk.StringVar()
         ttk.Entry(r1,textvariable=self.px4_dir_var,width=64).pack(side=tk.LEFT,padx=10,fill=tk.X,expand=True)
-        self._mk_button(r1, text="Browse", style="GlassGhost.TButton", sound="click",
-                        command=self._select_px4_dir, side=tk.LEFT)
-
+        self._mk_button(r1, text="Browse", style="GlassGhost.TButton", sound="click", command=self._select_px4_dir, side=tk.LEFT)
         r2=ttk.Frame(card,style="Card.TFrame"); r2.pack(fill=tk.X,pady=(0,12))
         ttk.Label(r2,text="Home Latitude (°)",style="Card.TLabel").pack(side=tk.LEFT); self.lat_var=tk.StringVar()
         ttk.Entry(r2,textvariable=self.lat_var,width=18).pack(side=tk.LEFT,padx=(8,20))
         ttk.Label(r2,text="Home Longitude (°)",style="Card.TLabel").pack(side=tk.LEFT); self.lon_var=tk.StringVar()
         ttk.Entry(r2,textvariable=self.lon_var,width=18).pack(side=tk.LEFT,padx=(8,10))
-        self._mk_button(r2, text="Import from .plan/.kml", style="GlassSecondary.TButton", sound="click",
-                        command=self._import_coords, side=tk.LEFT, padx=(12,0))
-
+        self._mk_button(r2, text="Import from .plan/.kml", style="GlassSecondary.TButton", sound="click", command=self._import_coords, side=tk.LEFT, padx=(12,0))
         r3=ttk.Frame(card,style="Card.TFrame"); r3.pack(fill=tk.X)
         ttk.Label(r3,text="Simulation Speed (×)",style="Card.TLabel").pack(side=tk.LEFT); self.speed_var=tk.StringVar(value="20")
         ttk.Entry(r3,textvariable=self.speed_var,width=12).pack(side=tk.LEFT,padx=(8,20))
-        
-        # Vehicle Target (Dynamically populated)
         ttk.Label(r3,text="Vehicle Target",style="Card.TLabel").pack(side=tk.LEFT); self.vehicle_var=tk.StringVar(value="gazebo_typhoon_h480")
-        self.vehicle_combo=ttk.Combobox(r3,textvariable=self.vehicle_var,state="readonly",
-                                        values=self._get_vehicle_targets(""),width=32,style="Beagle.TCombobox") 
+        self.vehicle_combo=ttk.Combobox(r3,textvariable=self.vehicle_var,state="readonly", values=self._get_vehicle_targets(""),width=32,style="Beagle.TCombobox") 
         self.vehicle_combo.pack(side=tk.LEFT,padx=(8,20))
         self.vehicle_combo.bind("<<ComboboxSelected>>", lambda e: play_sound("click", widget=self, loud=True), add="+")
-
-        # Home altitude (m AMSL) - Label Clarified
         ttk.Label(r3,text="Home Altitude (m AMSL)",style="Card.TLabel").pack(side=tk.LEFT)
         self.alt_var=tk.StringVar(value="0")  
         ttk.Entry(r3,textvariable=self.alt_var,width=12).pack(side=tk.LEFT,padx=(8,0))
-
         ctrls=ttk.Frame(root,padding=(0,12,0,12),style="InnerPlate.TFrame"); ctrls.pack(fill=tk.X)
-        self.start_btn=self._mk_button(ctrls, text="Start Simulation", style="GlassPrimary.TButton", sound="start",
-                                       command=self._start, side=tk.LEFT)
-        self.stop_btn=self._mk_button(ctrls, text="Stop", style="GlassDanger.TButton", sound="stop",
-                                      command=self._stop, side=tk.LEFT, padx=(10,0))
+        self.start_btn=self._mk_button(ctrls, text="Start Simulation", style="GlassPrimary.TButton", sound="start", command=self._start, side=tk.LEFT)
+        self.stop_btn=self._mk_button(ctrls, text="Stop", style="GlassDanger.TButton", sound="stop", command=self._stop, side=tk.LEFT, padx=(10,0))
         self.stop_btn.configure(state=tk.DISABLED)
-        self.toggle_logs_btn=self._mk_button(ctrls, text="Hide Logs", style="GlassGhost.TButton", sound="click",
-                                             command=self._toggle_logs, side=tk.RIGHT)
-
+        self.toggle_logs_btn=self._mk_button(ctrls, text="Hide Logs", style="GlassGhost.TButton", sound="click", command=self._toggle_logs, side=tk.RIGHT)
         self.log_card=ttk.Labelframe(root,text="Build / Run Logs",padding=10,style="Card.TFrame")
         s=ttk.Style(self); s.configure("Card.TLabelframe",background=CARD,foreground=ACCENT)
         s.configure("Card.TLabelframe.Label",background=CARD,foreground=ACCENT,font=("Ubuntu Medium",13))
-        
-        # Color-coded Log Text configuration 
         self.log_text=tk.Text(self.log_card,wrap=tk.NONE,height=18,bd=0,highlightthickness=0,background=CARD,foreground=TEXT,insertbackground=ACCENT)
-        self.log_text.tag_configure("info", foreground=ACCENT) 
-        self.log_text.tag_configure("error", foreground=DANGER) 
-        self.log_text.tag_configure("launch", foreground="#7FFF00")
-        self.log_text.tag_configure("normal", foreground=TEXT) 
-        
+        self.log_text.tag_configure("info", foreground=ACCENT); self.log_text.tag_configure("error", foreground=DANGER) 
+        self.log_text.tag_configure("launch", foreground="#7FFF00"); self.log_text.tag_configure("normal", foreground=TEXT) 
         self.log_text.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
         scroll_y=ttk.Scrollbar(self.log_card,orient="vertical",command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll_y.set); scroll_y.pack(side=tk.RIGHT,fill=tk.Y)
@@ -414,100 +333,59 @@ class PX4SimApp(ThemedApp):
         krow1=ttk.Frame(kcard,style="Card.TFrame"); krow1.pack(fill=tk.X,pady=(0,12))
         ttk.Label(krow1,text="ULG Log File",style="Card.TLabel").pack(side=tk.LEFT); self.ulg_path_var=tk.StringVar()
         ttk.Entry(krow1,textvariable=self.ulg_path_var,width=64).pack(side=tk.LEFT,padx=10,fill=tk.X,expand=True)
-        self._mk_button(krow1, text="Browse", style="GlassGhost.TButton", sound="click",
-                        command=self._select_ulg, side=tk.LEFT)
+        self._mk_button(krow1, text="Browse", style="GlassGhost.TButton", sound="click", command=self._select_ulg, side=tk.LEFT)
         krow2=ttk.Frame(kcard,style="Card.TFrame"); krow2.pack(fill=tk.X)
         ttk.Label(krow2,text="Output Folder",style="Card.TLabel").pack(side=tk.LEFT); self.out_dir_var=tk.StringVar(value=str(Path.home()/ "Documents"))
-        self.out_dir_var.set(str(self.kml_out_last_dir)) # Set initial value from config default
+        self.out_dir_var.set(str(self.kml_out_last_dir))
         ttk.Entry(krow2,textvariable=self.out_dir_var,width=64).pack(side=tk.LEFT,padx=10,fill=tk.X,expand=True)
-        self._mk_button(krow2, text="Choose", style="GlassGhost.TButton", sound="click",
-                        command=self._select_out_dir, side=tk.LEFT)
+        self._mk_button(krow2, text="Choose", style="GlassGhost.TButton", sound="click", command=self._select_out_dir, side=tk.LEFT)
         kctrl=ttk.Frame(kroot,padding=(0,12,0,12),style="InnerPlate.TFrame"); kctrl.pack(fill=tk.X)
-        self.convert_btn=self._mk_button(kctrl, text="Convert ULG → KML", style="GlassPrimary.TButton", sound="start",
-                                         command=self._convert_ulg_to_kml, side=tk.LEFT)
-        self.open_out_btn=self._mk_button(kctrl, text="Open Output Folder", style="GlassSecondary.TButton", sound="click",
-                                          command=self._open_output_folder, side=tk.LEFT, padx=(10,0))
+        self.convert_btn=self._mk_button(kctrl, text="Convert ULG → KML", style="GlassPrimary.TButton", sound="start", command=self._convert_ulg_to_kml, side=tk.LEFT)
+        self.open_out_btn=self._mk_button(kctrl, text="Open Output Folder", style="GlassSecondary.TButton", sound="click", command=self._open_output_folder, side=tk.LEFT, padx=(10,0))
         self.k_status_var=tk.StringVar(value="Ready"); ttk.Label(kroot,textvariable=self.k_status_var,style="Muted.TLabel").pack(anchor=tk.W,pady=(6,0))
-
-        # Show Simulation first
         self._sim_page.pack(fill=tk.BOTH,expand=True)
 
     def _switch_page(self, which:str):
-        self._sim_page.pack_forget()
-        self._kml_page.pack_forget()
+        self._sim_page.pack_forget(); self._kml_page.pack_forget()
         if which=="sim":
-            self._seg_sim_btn.configure(style="SegmentActive.TButton")
-            self._seg_kml_btn.configure(style="Segment.TButton")
+            self._seg_sim_btn.configure(style="SegmentActive.TButton"); self._seg_kml_btn.configure(style="Segment.TButton")
             self._sim_page.pack(fill=tk.BOTH,expand=True)
-            try: play_sound("info", widget=self, loud=True)
-            except Exception: pass
         else:
-            self._seg_sim_btn.configure(style="Segment.TButton")
-            self._seg_kml_btn.configure(style="SegmentActive.TButton")
+            self._seg_sim_btn.configure(style="Segment.TButton"); self._seg_kml_btn.configure(style="SegmentActive.TButton")
             self._kml_page.pack(fill=tk.BOTH,expand=True)
-            try: play_sound("info", widget=self, loud=True)
-            except Exception: pass
+        try: play_sound("info", widget=self, loud=True)
+        except Exception: pass
 
-    # -------- File/Dir selection (Zenity preferred; fixed filters) --------
     def _select_px4_dir(self):
-        d=None
-        
-        initial_dir = self.px4_dir_var.get() if Path(self.px4_dir_var.get()).is_dir() else str(Path.home())
-        
+        d=None; initial_dir = self.px4_dir_var.get() if Path(self.px4_dir_var.get()).is_dir() else str(Path.home())
         if self._zenity_available():
             try:
-                # Use initial_dir for Zenity
-                d=subprocess.check_output(
-                    ["zenity","--file-selection","--directory","--title","Select PX4 Firmware folder (contains 'Makefile')",
-                     f"--filename={initial_dir}/"],
-                    stderr=subprocess.DEVNULL, text=True
-                ).strip() or None
-            except subprocess.CalledProcessError:
-                d=None
+                d=subprocess.check_output(["zenity","--file-selection","--directory","--title","Select PX4 Firmware folder",f"--filename={initial_dir}/"], stderr=subprocess.DEVNULL, text=True).strip() or None
+            except subprocess.CalledProcessError: d=None
         else:
-            # Use initialdir for Tkinter filedialog
-            d=filedialog.askdirectory(title="Select PX4 Firmware folder (contains 'Makefile')", initialdir=initial_dir)
+            d=filedialog.askdirectory(title="Select PX4 Firmware folder", initialdir=initial_dir)
         if d:
-            self.px4_dir_var.set(d)
-            targets = self._get_vehicle_targets(d)
-            self.vehicle_combo.configure(values=targets)
-            if not self.vehicle_var.get() in targets and targets:
-                self.vehicle_var.set(targets[0])
+            self.px4_dir_var.set(d); targets = self._get_vehicle_targets(d); self.vehicle_combo.configure(values=targets)
+            if not self.vehicle_var.get() in targets and targets: self.vehicle_var.set(targets[0])
             try: play_sound("success", widget=self, loud=True)
             except Exception: pass
 
     def _import_coords(self):
-        p=None
-        # Use the PX4 directory as the initial location for plan/kml import
-        initial_file = self.px4_dir_var.get() if Path(self.px4_dir_var.get()).is_dir() else str(Path.home())
-
+        p=None; initial_file = self.px4_dir_var.get() if Path(self.px4_dir_var.get()).is_dir() else str(Path.home())
         if self._zenity_available():
             try:
-                p=subprocess.check_output(
-                    ["zenity","--file-selection","--title","Select QGroundControl plan or KML",
-                     f"--file-filter=Plan/KML | *.plan *.kml",
-                     f"--file-filter=All files | *",
-                     f"--filename={initial_file}/"], # Use filename for initial dir/file
-                    stderr=subprocess.DEVNULL, text=True
-                ).strip() or None
-            except subprocess.CalledProcessError:
-                p=None
+                p=subprocess.check_output(["zenity","--file-selection","--title","Select QGroundControl plan or KML",f"--file-filter=Plan/KML | *.plan *.kml",f"--file-filter=All files | *",f"--filename={initial_file}/"], stderr=subprocess.DEVNULL, text=True).strip() or None
+            except subprocess.CalledProcessError: p=None
         else:
-            p=filedialog.askopenfilename(title="Select QGroundControl .plan or .kml file",
-                                         filetypes=[("QGroundControl Plan","*.plan"),("KML File","*.kml"),("All files","*.*")],
-                                         initialdir=initial_file)
+            p=filedialog.askopenfilename(title="Select QGroundControl .plan or .kml file",filetypes=[("QGroundControl Plan","*.plan"),("KML File","*.kml"),("All files","*.*")],initialdir=initial_file)
         if not p: return
         fp=Path(p); lat=lon=None
         try:
             if fp.suffix.lower()==".kml": lat,lon=self._coords_from_kml(fp)
             elif fp.suffix.lower()==".plan": lat,lon=self._coords_from_plan(fp)
-            if lat is None or lon is None: 
-                play_sound("error", widget=self, loud=True); messagebox.showwarning("Not found","No suitable coordinates found."); return
-        except Exception as e:
-            play_sound("error", widget=self, loud=True); messagebox.showerror("Import failed",f"Could not read coordinates: {e}"); return
-        if lat<lon:  # simple anti-swapping heuristic
-            lat,lon=lon,lat
-            self._append_log("[INFO] Coordinates automatically swapped (lat assumed > lon).\n")
+            if lat is None or lon is None: play_sound("error", widget=self, loud=True); messagebox.showwarning("Not found","No suitable coordinates found."); return
+        except Exception as e: play_sound("error", widget=self, loud=True); messagebox.showerror("Import failed",f"Could not read coordinates: {e}"); return
+        if lat<lon: lat,lon=lon,lat; self._append_log("[INFO] Coordinates automatically swapped (lat assumed > lon).\n")
         self.lat_var.set(f"{lat:.8f}"); self.lon_var.set(f"{lon:.8f}")
         try: play_sound("success", widget=self, loud=True)
         except Exception: pass
@@ -515,54 +393,28 @@ class PX4SimApp(ThemedApp):
         play_sound("info", widget=self, loud=True); messagebox.showinfo("Imported", f"Latitude: {lat:.6f}\nLongitude: {lon:.6f}")
 
     def _select_ulg(self):
-        p=None
-        
-        # Use the last-used ULG directory
-        initial_dir = str(self.ulg_last_dir)
-        
+        p=None; initial_dir = str(self.ulg_last_dir)
         if self._zenity_available():
             try:
-                p=subprocess.check_output(
-                    ["zenity","--file-selection","--title","Select ULog file",
-                     f"--file-filter=ULog | *.ulg",
-                     f"--file-filter=All files | *",
-                     f"--filename={initial_dir}/"],
-                    stderr=subprocess.DEVNULL, text=True
-                ).strip() or None
-            except subprocess.CalledProcessError:
-                p=None
+                p=subprocess.check_output(["zenity","--file-selection","--title","Select ULog file",f"--file-filter=ULog | *.ulg",f"--file-filter=All files | *",f"--filename={initial_dir}/"], stderr=subprocess.DEVNULL, text=True).strip() or None
+            except subprocess.CalledProcessError: p=None
         else:
-            p=filedialog.askopenfilename(title="Select ULG log file",filetypes=[("PX4 ULog","*.ulg"),("All files","*.*")],
-                                         initialdir=initial_dir)
+            p=filedialog.askopenfilename(title="Select ULG log file",filetypes=[("PX4 ULog","*.ulg"),("All files","*.*")],initialdir=initial_dir)
         if p:
-            self.ulg_path_var.set(p)
-            # Save the directory of the selected file
-            self.ulg_last_dir = Path(p).parent
+            self.ulg_path_var.set(p); self.ulg_last_dir = Path(p).parent
             try: play_sound("success", widget=self, loud=True)
             except Exception: pass
 
     def _select_out_dir(self):
-        d=None
-        
-        # Use the last-used KML output directory
-        initial_dir = str(self.kml_out_last_dir)
-        
+        d=None; initial_dir = str(self.kml_out_last_dir)
         if self._zenity_available():
             try:
-                d=subprocess.check_output(
-                    ["zenity","--file-selection","--directory","--title","Select output folder for KML",
-                     f"--filename={initial_dir}/"],
-                    stderr=subprocess.DEVNULL, text=True
-                ).strip() or None
-            except subprocess.CalledProcessError:
-                d=None
+                d=subprocess.check_output(["zenity","--file-selection","--directory","--title","Select output folder",f"--filename={initial_dir}/"], stderr=subprocess.DEVNULL, text=True).strip() or None
+            except subprocess.CalledProcessError: d=None
         else:
-            d=filedialog.askdirectory(title="Select output folder for KML",
-                                      initialdir=initial_dir)
+            d=filedialog.askdirectory(title="Select output folder for KML", initialdir=initial_dir)
         if d:
-            self.out_dir_var.set(d)
-            # Save the newly selected directory
-            self.kml_out_last_dir = Path(d)
+            self.out_dir_var.set(d); self.kml_out_last_dir = Path(d)
             try: play_sound("success", widget=self, loud=True)
             except Exception: pass
 
@@ -573,21 +425,18 @@ class PX4SimApp(ThemedApp):
         el=pt.find("kml:coordinates",ns)
         if el is None or not el.text: return (None,None)
         first=el.text.strip().split()[0]
-        try:
-            lo,la,*_=first.split(","); return (float(la), float(lo))
+        try: lo,la,*_=first.split(","); return (float(la), float(lo))
         except Exception: return (None,None)
 
     def _coords_from_plan(self, file_path:Path):
         data=json.loads(file_path.read_text())
         try:
             for it in data.get("mission",{}).get("items",[]):
-                if "param5" in it and "param6" in it:
-                    return (float(it["param5"]), float(it["param6"]))  # first waypoint
+                if "param5" in it and "param6" in it: return (float(it["param5"]), float(it["param6"]))
         except Exception: pass
         try:
             php=data.get("mission",{}).get("plannedHomePosition")
-            if isinstance(php,list) and len(php)>=2:
-                return (float(php[0]), float(php[1]))
+            if isinstance(php,list) and len(php)>=2: return (float(php[0]), float(php[1]))
         except Exception: pass
         return (None,None)
 
@@ -599,32 +448,18 @@ class PX4SimApp(ThemedApp):
         speed=self.speed_var.get().strip() or "20"
         vehicle=self.vehicle_var.get().strip() or "gazebo_typhoon_h480"
         alt=self.alt_var.get().strip() or "0"
-        
-        # Save PX4 directory immediately
-        if px4_dir:
-            self.px4_dir_var.set(px4_dir)
-        
+        if px4_dir: self.px4_dir_var.set(px4_dir)
         if not px4_dir or not Path(px4_dir).is_dir():
             play_sound("error", widget=self, loud=True); messagebox.showerror("Missing folder","Please select a valid PX4 Firmware folder."); return
-        try:
-            lat_f=float(lat); lon_f=float(lon); assert -90<=lat_f<=90 and -180<=lon_f<=180
-        except Exception:
-            play_sound("error", widget=self, loud=True); messagebox.showerror("Invalid location","Enter numeric latitude (-90..90) and longitude (-180..180) or import from .plan."); return
-        try:
-            speed_i=int(float(speed)); assert speed_i>0
-        except Exception:
-            play_sound("error", widget=self, loud=True); messagebox.showerror("Invalid speed","Simulation speed must be a positive number."); return
-        try:
-            alt_f=float(alt)
-        except Exception:
-            play_sound("error", widget=self, loud=True); messagebox.showerror("Invalid altitude","Home altitude must be a number (meters AMSL)."); return
-
-        # Ensure output dir variable is updated before saving config
+        try: lat_f=float(lat); lon_f=float(lon); assert -90<=lat_f<=90 and -180<=lon_f<=180
+        except Exception: play_sound("error", widget=self, loud=True); messagebox.showerror("Invalid location","Enter numeric latitude/longitude."); return
+        try: speed_i=int(float(speed)); assert speed_i>0
+        except Exception: play_sound("error", widget=self, loud=True); messagebox.showerror("Invalid speed","Simulation speed must be positive."); return
+        try: alt_f=float(alt)
+        except Exception: play_sound("error", widget=self, loud=True); messagebox.showerror("Invalid altitude","Home altitude must be a number."); return
+        
         out_dir = self.out_dir_var.get().strip()
-        if out_dir:
-            self.kml_out_last_dir = Path(out_dir)
-
-        # Save all current configuration parameters
+        if out_dir: self.kml_out_last_dir = Path(out_dir)
         self._save_config({"px4_dir":px4_dir,"lat":str(lat_f),"lon":str(lon_f),"speed":str(speed_i),"vehicle":vehicle, "alt":str(alt_f),
                            "ulg_last_dir": str(self.ulg_last_dir), "kml_out_last_dir": str(self.kml_out_last_dir)})
 
@@ -655,32 +490,48 @@ make px4_sitl_default {vehicle}
 '''
         try:
             self._stop_reader.clear()
-            self.proc=subprocess.Popen(["/bin/bash","-lc",bash],cwd=px4_dir,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,universal_newlines=True)
+            # CRITICAL: start_new_session=True allows us to kill the whole process group later
+            self.proc=subprocess.Popen(["/bin/bash","-lc",bash],cwd=px4_dir,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,universal_newlines=True, start_new_session=True)
             self._start_reader(self.proc.stdout)
             self._append_log(f"[INFO] Starting sim at lat={lat_f}, lon={lon_f}, alt={alt_f} m, speed={speed_i}, vehicle={vehicle}\n")
             self._append_log("[INFO] Sourced Gazebo classic + PX4 setup; headless GL enabled.\n")
             self._set_controls(True)
             play_sound("start", widget=self, loud=True)
         except FileNotFoundError:
-            play_sound("error", widget=self, loud=True); messagebox.showerror("Missing toolchain","'make' not found. Install: sudo apt-get install -y build-essential")
+            play_sound("error", widget=self, loud=True); messagebox.showerror("Missing toolchain","'make' not found.")
         except Exception as e:
             play_sound("error", widget=self, loud=True); messagebox.showerror("Failed to start", str(e))
 
     def _stop(self):
-        if self.proc is None: return
-        try: self.proc.terminate(); self.proc.wait(timeout=5)
-        except Exception:
-            try: self.proc.kill()
-            except Exception: pass
-        finally:
-            self.proc=None; self._stop_reader.set(); self._set_controls(False)
-            self._append_log("[INFO] Simulation stopped.\n"); play_sound("stop", widget=self, loud=True)
+        # CRITICAL FIX: Killing only the bash process leaves "px4" and "gzserver" orphaned.
+        # We must kill the process group AND explicitly cleanup PX4 binaries.
+        if self.proc is not None:
+            try:
+                # 1. Kill the process group (Bash + Make)
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+            except Exception:
+                try: self.proc.kill()
+                except Exception: pass
+            
+            self.proc = None
+            self._stop_reader.set()
+            self._set_controls(False)
+
+        # 2. Scorched Earth: Explicitly kill lingering PX4/Gazebo binaries
+        # This prevents QGroundControl from reconnecting to a "zombie" drone.
+        try:
+            subprocess.run(["pkill", "-f", "px4"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "gzserver"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "gzclient"], stderr=subprocess.DEVNULL)
+        except Exception: pass
+
+        self._append_log("[INFO] Simulation processes terminated.\n")
+        play_sound("stop", widget=self, loud=True)
 
     def _set_controls(self, running:bool):
         self.start_btn.configure(state=tk.DISABLED if running else tk.NORMAL)
         self.stop_btn.configure(state=tk.NORMAL if running else tk.DISABLED)
 
-    # -------- Logs (Color-Coded) --------
     def _toggle_logs(self):
         self._log_visible=not self._log_visible
         if self._log_visible:
@@ -710,24 +561,16 @@ make px4_sitl_default {vehicle}
         self.after(80, self._poll_log_queue)
 
     def _append_log(self, text:str):
-        # Determine tag based on content for color-coding
         tag = "normal"
-        if "[LAUNCH]" in text or "[INFO] Starting sim" in text:
-            tag = "launch"
-        elif "[ERROR]" in text or "fail" in text.lower() or "error" in text.lower():
-            tag = "error"
-        elif "[INFO]" in text or "[INSTALL]" in text:
-            tag = "info"
-            
-        self.log_text.insert(tk.END, text, tag); 
-        self.log_text.see(tk.END)
+        if "[LAUNCH]" in text or "[INFO] Starting sim" in text: tag = "launch"
+        elif "[ERROR]" in text or "fail" in text.lower() or "error" in text.lower(): tag = "error"
+        elif "[INFO]" in text or "[INSTALL]" in text: tag = "info"
+        self.log_text.insert(tk.END, text, tag); self.log_text.see(tk.END)
 
-    # -------- KML Converter --------
     def _open_output_folder(self):
         out=self.out_dir_var.get().strip()
         if out:
-            try:
-                subprocess.Popen(["xdg-open",out])
+            try: subprocess.Popen(["xdg-open",out])
             except Exception: pass
 
     def _unique_name(self, base:Path)->Path:
@@ -744,21 +587,15 @@ make px4_sitl_default {vehicle}
 
     def _convert_ulg_to_kml(self):
         ulg=self.ulg_path_var.get().strip(); out_dir=self.out_dir_var.get().strip()
-        if not ulg or not Path(ulg).is_file():
-            play_sound("error", widget=self, loud=True); messagebox.showerror("Missing ULG","Select a valid .ulg file."); return
-        if not out_dir or not Path(out_dir).is_dir():
-            play_sound("error", widget=self, loud=True); messagebox.showerror("Missing output folder","Select a valid output folder."); return
+        if not ulg or not Path(ulg).is_file(): play_sound("error", widget=self, loud=True); messagebox.showerror("Missing ULG","Select a valid .ulg file."); return
+        if not out_dir or not Path(out_dir).is_dir(): play_sound("error", widget=self, loud=True); messagebox.showerror("Missing output folder","Select a valid output folder."); return
         if not self._ensure_kml_runtime():
             play_sound("error", widget=self, loud=True); self.k_status_var.set("Could not install pyulog/simplekml")
             messagebox.showerror("ULG → KML","Could not install required Python packages (pyulog/simplekml)."); return
-
         from shutil import which
         cmd=["ulog2kml", ulg] if which("ulog2kml") else [sys.executable,"-m","pyulog.ulog2kml", ulg]
         self.k_status_var.set("Converting…"); self.convert_btn.configure(state=tk.DISABLED)
-        
-        # Ensure output dir variable is updated before saving config
         self.kml_out_last_dir = Path(out_dir)
-        
         def run():
             try:
                 p=subprocess.run(cmd,cwd=out_dir,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -771,8 +608,6 @@ make px4_sitl_default {vehicle}
                         try: produced.unlink()
                         except Exception: pass
                     self._set_k_status(f"KML created: {tgt.name}",ok=True); play_sound("success", widget=self, loud=True); return
-                
-                # Fallback to internal converter
                 self._append_log("[INFO] ulog2kml failed; running fallback converter...\n")
                 tgt=self._unique_name(Path(out_dir)/(Path(ulg).stem+".kml"))
                 _fallback_ulog_to_kml(ulg,str(tgt))
@@ -782,7 +617,6 @@ make px4_sitl_default {vehicle}
             finally:
                 try: self.convert_btn.configure(state=tk.NORMAL)
                 except Exception: pass
-                
         threading.Thread(target=run,daemon=True).start()
 
     def _set_k_status(self,text,ok=True):
@@ -790,34 +624,26 @@ make px4_sitl_default {vehicle}
         try: (messagebox.showinfo if ok else messagebox.showerror)("ULG → KML", text)
         except Exception: pass
 
-    # -------- Config & Close --------
     def _load_config(self):
         if CONFIG_PATH.exists():
             try:
                 d=json.loads(CONFIG_PATH.read_text())
-                
                 px4_dir = d.get("px4_dir","")
                 self.px4_dir_var.set(px4_dir)
                 self.lat_var.set(d.get("lat",""))
                 self.lon_var.set(d.get("lon",""))
                 self.speed_var.set(d.get("speed","20"))
                 self.alt_var.set(d.get("alt","0")) 
-
-                # Load last used directories (NEW)
                 self.ulg_last_dir = Path(d.get("ulg_last_dir", str(Path.home())))
                 self.kml_out_last_dir = Path(d.get("kml_out_last_dir", str(Path.home() / "Documents")))
                 self.out_dir_var.set(str(self.kml_out_last_dir))
-                
-                # Update vehicle targets on load
                 targets = self._get_vehicle_targets(px4_dir)
                 self.vehicle_combo.configure(values=targets)
                 if self.vehicle_var.get() not in targets:
                     self.vehicle_var.set(d.get("vehicle", targets[0] if targets else "gazebo_typhoon_h480"))
-                
             except Exception: pass
             
     def _save_config(self,data:dict):
-        # Add the last used directories to the data dictionary before saving
         data["ulg_last_dir"] = str(self.ulg_last_dir)
         data["kml_out_last_dir"] = str(self.kml_out_last_dir)
         try: CONFIG_PATH.write_text(json.dumps(data,indent=2))
@@ -826,18 +652,8 @@ make px4_sitl_default {vehicle}
     def _on_close(self):
         if self.proc is not None and not messagebox.askyesno("Quit?","A simulation is running. Stop and quit?"): return
         if self.proc is not None: self._stop()
-        
-        # Save config on close to preserve final directory states
-        current_config = {
-            "px4_dir": self.px4_dir_var.get(),
-            "lat": self.lat_var.get(),
-            "lon": self.lon_var.get(),
-            "speed": self.speed_var.get(),
-            "vehicle": self.vehicle_var.get(),
-            "alt": self.alt_var.get()
-        }
+        current_config = { "px4_dir": self.px4_dir_var.get(), "lat": self.lat_var.get(), "lon": self.lon_var.get(), "speed": self.speed_var.get(), "vehicle": self.vehicle_var.get(), "alt": self.alt_var.get() }
         self._save_config(current_config)
-
         self.destroy()
 
 def main():
