@@ -1,0 +1,8 @@
+{
+  "allowed_ids": [
+    "",
+    "another_id"
+  ],
+  "status": "active",
+  "message": "Access Denied. Please contact Atiq for activation."
+}
